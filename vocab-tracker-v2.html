@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>River's Vocab</title>
+  <!--
+  ══════════════════════════════════════════════════════════
+  ONE-TIME SETUP — do this before using the app
+  ══════════════════════════════════════════════════════════
+  1. Go to https://console.cloud.google.com
+  2. Create a new project (any name)
+  3. APIs & Services → Library → search "Google Drive API" → Enable
+  4. APIs & Services → Credentials → Create Credentials → OAuth 2.0 Client ID
+  5. Application type: Web application
+  6. Authorized JavaScript origins — add your GitHub Pages URL:
+       https://YOUR_USERNAME.github.io
+     (also add http://localhost for local testing if needed)
+  7. Copy the Client ID → paste below replacing YOUR_CLIENT_ID_HERE
+  8. Push this file to your GitHub repo → enable GitHub Pages
+  ══════════════════════════════════════════════════════════
+  -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0e0e10; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0e0e10; }
+    ::-webkit-scrollbar-thumb { background: #2a2a2e; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ── Fluent Emoji helper ──────────────────────────────────────
+    const CDN = 'https://cdn.jsdelivr.net/gh/shuding/fluentui-emoji-unicode/assets/';
+    const E = ({ code, alt, size = '1.2em' }) => (
+      <img src={`${CDN}${code}_3d.png`} alt={alt}
+        style={{ width: size, height: size, verticalAlign: '-0.2em', display: 'inline-block' }} />
+    );
+
+    // ← PASTE YOUR GOOGLE OAUTH CLIENT ID HERE
+    const GOOGLE_CLIENT_ID = '486561091192-ls3fuv1sonvjf2ofk561n37s1b4umtvo.apps.googleusercontent.com';
+
+    const SCOPES    = 'https://www.googleapis.com/auth/drive.appdata';
+    const FILE_NAME = 'river-vocab-data.json';
+
+    // ── Google Drive hook ────────────────────────────────────────
+    function useGoogleDrive() {
+      const [entries,  setEntries]  = useState([]);
+      const [loaded,   setLoaded]   = useState(false);
+      const [signedIn, setSignedIn] = useState(false);
+      const [error,    setError]    = useState(null);
+
+      const tokenClientRef = useRef(null);
+      const tokenRef       = useRef(null);
+      const fileIdRef      = useRef(null);
+
+      // Find or create the vocab JSON file in Drive's hidden appDataFolder
+      async function findOrCreateFile(token) {
+        if (fileIdRef.current) return fileIdRef.current;
+
+        const q   = encodeURIComponent(`name='${FILE_NAME}'`);
+        const res = await fetch(
+          `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id)`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const data = await res.json();
+
+        if (data.files && data.files.length > 0) {
+          fileIdRef.current = data.files[0].id;
+          return fileIdRef.current;
+        }
+
+        // File doesn't exist yet — create it
+        const form = new FormData();
+        form.append('metadata', new Blob(
+          [JSON.stringify({ name: FILE_NAME, parents: ['appDataFolder'] })],
+          { type: 'application/json' }
+        ));
+        form.append('media', new Blob([JSON.stringify([])], { type: 'application/json' }));
+
+        const createRes = await fetch(
+          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+          { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form }
+        );
+        const created = await createRes.json();
+        fileIdRef.current = created.id;
+        return fileIdRef.current;
+      }
+
+      async function loadEntries(token) {
+        try {
+          const fileId = await findOrCreateFile(token);
+          const res    = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          const data = await res.json();
+          setEntries(Array.isArray(data) ? data : []);
+        } catch (e) {
+          setError('Could not load entries. Try refreshing.');
+        } finally {
+          setLoaded(true);
+        }
+      }
+
+      useEffect(() => {
+        function initClient() {
+          tokenClientRef.current = google.accounts.oauth2.initTokenClient({
+            client_id: GOOGLE_CLIENT_ID,
+            scope: SCOPES,
+            callback: async (response) => {
+              if (response.error) {
+                setError('Sign-in failed. Try again.');
+                setLoaded(true);
+                return;
+              }
+              const token  = response.access_token;
+              const expiry = Date.now() + response.expires_in * 1000;
+              tokenRef.current = token;
+              localStorage.setItem('rv_token',  token);
+              localStorage.setItem('rv_expiry', String(expiry));
+              setSignedIn(true);
+              await loadEntries(token);
+            },
+          });
+
+          // Resume session if token is still valid
+          const stored = localStorage.getItem('rv_token');
+          const expiry = localStorage.getItem('rv_expiry');
+          if (stored && expiry && Date.now() < parseInt(expiry)) {
+            tokenRef.current = stored;
+            setSignedIn(true);
+            loadEntries(stored);
+          } else {
+            localStorage.removeItem('rv_token');
+            localStorage.removeItem('rv_expiry');
+            setLoaded(true); // show login screen
+          }
+        }
+
+        // Wait for GIS library to be ready
+        if (window.google?.accounts) {
+          initClient();
+        } else {
+          const iv = setInterval(() => {
+            if (window.google?.accounts) {
+              clearInterval(iv);
+              initClient();
+            }
+          }, 100);
+          return () => clearInterval(iv);
+        }
+      }, []);
+
+      function signIn() {
+        setError(null);
+        tokenClientRef.current?.requestAccessToken({ prompt: '' });
+      }
+
+      function signOut() {
+        localStorage.removeItem('rv_token');
+        localStorage.removeItem('rv_expiry');
+        tokenRef.current  = null;
+        fileIdRef.current = null;
+        setSignedIn(false);
+        setEntries([]);
+        setLoaded(true);
+      }
+
+      async function save(newEntries) {
+        setEntries(newEntries);
+        try {
+          const token  = tokenRef.current;
+          const fileId = await findOrCreateFile(token);
+          await fetch(
+            `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+            {
+              method:  'PATCH',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body:    JSON.stringify(newEntries),
+            }
+          );
+        } catch (e) {
+          console.error('Save failed:', e);
+          setError('Save failed — check your connection.');
+        }
+      }
+
+      return { entries, save, loaded, signedIn, signIn, signOut, error };
+    }
+
+    // ── Main component ───────────────────────────────────────────
+    function VocabTracker() {
+      const { entries, save, loaded, signedIn, signIn, signOut, error } = useGoogleDrive();
+      const [view,        setView]        = useState('home');
+      const [searchQ,     setSearchQ]     = useState('');
+      const [randomEntry, setRandomEntry] = useState(null);
+      const [editId,      setEditId]      = useState(null);
+      const [editContent, setEditContent] = useState('');
+      const [newContent,  setNewContent]  = useState('');
+
+      function goRandom() {
+        if (entries.length === 0) return;
+        const r = entries[Math.floor(Math.random() * entries.length)];
+        setRandomEntry(r);
+        setView('random');
+      }
+
+      function addEntry() {
+        if (!newContent.trim()) return;
+        const entry = { id: Date.now().toString(), content: newContent.trim(), createdAt: Date.now() };
+        save([entry, ...entries]);
+        setNewContent('');
+        setView('browse');
+      }
+
+      function deleteEntry(id) {
+        save(entries.filter((e) => e.id !== id));
+        if (view === 'random') setView('home');
+      }
+
+      function saveEdit(id) {
+        save(entries.map((e) => (e.id === id ? { ...e, content: editContent } : e)));
+        setEditId(null);
+      }
+
+      const filtered = entries.filter((e) =>
+        e.content.toLowerCase().includes(searchQ.toLowerCase())
+      );
+
+      // Loading
+      if (!loaded) {
+        return <div style={s.center}><span style={{ color: '#c8a97e', fontSize: 32 }}>●</span></div>;
+      }
+
+      // Sign-in screen
+      if (!signedIn) {
+        return (
+          <div style={s.root}>
+            <div style={s.loginWrap}>
+              <div style={s.loginLogo}>词</div>
+              <div style={s.loginTitle}>River's Vocab</div>
+              <div style={s.loginSub}>your personal vocabulary tracker</div>
+              {error && <div style={s.loginError}>{error}</div>}
+              <button style={s.googleBtn} onClick={signIn}>
+                Sign in with Google
+              </button>
+              <div style={s.loginNote}>only accesses its own private file in your Drive</div>
+            </div>
+          </div>
+        );
+      }
+
+      // Main app
+      return (
+        <div style={s.root}>
+          <div style={s.header}>
+            <div style={s.headerLeft}>
+              <span style={s.logo}>词</span>
+              <div>
+                <div style={s.title}>River's Vocab</div>
+                <div style={s.sub}>{entries.length} entries</div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button style={s.addBtn} onClick={() => setView('add')}>+ add</button>
+              <button style={s.signOutBtn} onClick={signOut} title="Sign out">↩</button>
+            </div>
+          </div>
+
+          {error && <div style={s.errorBanner}>{error}</div>}
+
+          <div style={s.nav}>
+            {['home', 'browse', 'search'].map((n) => (
+              <button key={n}
+                style={{ ...s.navBtn, ...(view === n ? s.navActive : {}) }}
+                onClick={() => setView(n)}
+              >{n}</button>
+            ))}
+            <button style={s.navBtn} onClick={goRandom}><E code="1f3b2" alt="🎲"/> random</button>
+          </div>
+
+          <div style={s.body}>
+
+            {view === 'home' && (
+              <div>
+                <div style={s.hero}>
+                  <div style={s.heroQuote}>"Learning a word a day keeps confusion at bay."</div>
+                  <div style={s.heroAttr}>— River, probably</div>
+                </div>
+                <div style={s.grid}>
+                  {[
+                    { icon: <E code="1f4d6" alt="📖" size="22px"/>, label: 'Browse all',  sub: `${entries.length} entries`, action: () => setView('browse') },
+                    { icon: <E code="1f50d" alt="🔍" size="22px"/>, label: 'Search',      sub: 'find anything',             action: () => setView('search') },
+                    { icon: <E code="1f3b2" alt="🎲" size="22px"/>, label: 'Random',      sub: 'surprise me',               action: goRandom },
+                    { icon: '＋',                                    label: 'Add entry',   sub: 'new word',                  action: () => setView('add') },
+                  ].map((c) => (
+                    <button key={c.label} style={s.card} onClick={c.action}>
+                      <div style={s.cardIcon}>{c.icon}</div>
+                      <div style={s.cardLabel}>{c.label}</div>
+                      <div style={s.cardSub}>{c.sub}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {view === 'browse' && (
+              <div>
+                {entries.length === 0 && <div style={s.empty}>no entries yet <E code="1f62d" alt="😭"/></div>}
+                {entries.map((e) => (
+                  <Entry key={e.id} entry={e} editId={editId} editContent={editContent}
+                    setEditContent={setEditContent}
+                    onEdit={() => { setEditId(e.id); setEditContent(e.content); }}
+                    onSave={() => saveEdit(e.id)}
+                    onCancel={() => setEditId(null)}
+                    onDelete={() => deleteEntry(e.id)} />
+                ))}
+              </div>
+            )}
+
+            {view === 'search' && (
+              <div>
+                <input style={s.searchBox} placeholder="type to search..."
+                  value={searchQ} onChange={(e) => setSearchQ(e.target.value)} autoFocus />
+                {searchQ && filtered.length === 0 && <div style={s.empty}>nothing found <E code="1f97a" alt="🥺"/></div>}
+                {filtered.map((e) => (
+                  <Entry key={e.id} entry={e} editId={editId} editContent={editContent}
+                    setEditContent={setEditContent}
+                    onEdit={() => { setEditId(e.id); setEditContent(e.content); }}
+                    onSave={() => saveEdit(e.id)}
+                    onCancel={() => setEditId(null)}
+                    onDelete={() => deleteEntry(e.id)} />
+                ))}
+              </div>
+            )}
+
+            {view === 'random' && randomEntry && (
+              <div>
+                <div style={s.randomTag}>✦ random pick</div>
+                <Entry entry={randomEntry} editId={editId} editContent={editContent}
+                  setEditContent={setEditContent}
+                  onEdit={() => { setEditId(randomEntry.id); setEditContent(randomEntry.content); }}
+                  onSave={() => saveEdit(randomEntry.id)}
+                  onCancel={() => setEditId(null)}
+                  onDelete={() => deleteEntry(randomEntry.id)} />
+                <button style={s.anotherBtn} onClick={goRandom}>another one <E code="1f3b2" alt="🎲"/></button>
+              </div>
+            )}
+
+            {view === 'add' && (
+              <div>
+                <div style={s.addTitle}>new entry</div>
+                <div style={s.addHint}>no fixed format — word + meaning, synonym group, example, context — anything <E code="1f617" alt="😗"/></div>
+                <textarea style={s.ta} value={newContent}
+                  onChange={(e) => setNewContent(e.target.value)}
+                  placeholder={"e.g.\n\nvacillating · wishy-washy · fence-sitter\n\nAll mean someone who can't commit or keeps changing their mind."}
+                  rows={8} autoFocus />
+                <div style={s.row}>
+                  <button style={s.cancelBtn} onClick={() => { setView('home'); setNewContent(''); }}>cancel</button>
+                  <button style={{ ...s.saveBtn, opacity: newContent.trim() ? 1 : 0.4 }}
+                    onClick={addEntry} disabled={!newContent.trim()}>save entry</button>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      );
+    }
+
+    // ── Entry component ──────────────────────────────────────────
+    function Entry({ entry, editId, editContent, setEditContent, onEdit, onSave, onCancel, onDelete }) {
+      const editing = editId === entry.id;
+      const [hov, setHov] = useState(false);
+
+      return (
+        <div
+          style={s.entryCard}
+          onMouseEnter={() => setHov(true)}
+          onMouseLeave={() => setHov(false)}
+          onClick={() => { if (!editing) setHov((h) => !h); }}
+        >
+          {editing ? (
+            <div>
+              <textarea
+                style={{ ...s.ta, minHeight: 80, marginBottom: 10 }}
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                autoFocus
+              />
+              <div style={s.row}>
+                <button style={s.cancelBtn} onClick={(e) => { e.stopPropagation(); onCancel(); }}>cancel</button>
+                <button style={s.saveBtn}   onClick={(e) => { e.stopPropagation(); onSave();  }}>save</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div style={s.entryText}>{entry.content}</div>
+              <div style={s.entryDate}>
+                {new Date(entry.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+              </div>
+              {hov && (
+                <div style={s.entryActions}>
+                  <button style={s.actionBtn} onClick={(e) => { e.stopPropagation(); onEdit();   }}>edit</button>
+                  <button style={{ ...s.actionBtn, color: '#e05555' }}
+                          onClick={(e) => { e.stopPropagation(); onDelete(); }}>delete</button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ── Styles (unchanged from original) ────────────────────────
+    const s = {
+      root:        { minHeight: '100vh', background: '#0e0e10', color: '#e8e4dc', fontFamily: "'Georgia','Times New Roman',serif", maxWidth: 620, margin: '0 auto', paddingBottom: 60 },
+      center:      { display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#0e0e10' },
+
+      loginWrap:   { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', padding: 24, textAlign: 'center' },
+      loginLogo:   { fontSize: 64, color: '#c8a97e', marginBottom: 16 },
+      loginTitle:  { fontSize: 24, fontWeight: 'bold', color: '#e8e4dc', marginBottom: 6 },
+      loginSub:    { fontSize: 13, color: '#444', fontFamily: 'monospace', marginBottom: 32 },
+      loginError:  { background: '#2a1515', border: '1px solid #5a2020', color: '#e08080', fontSize: 12, padding: '10px 16px', borderRadius: 8, fontFamily: 'monospace', marginBottom: 16, maxWidth: 300 },
+      googleBtn:   { background: '#e8e4dc', color: '#0e0e10', border: 'none', borderRadius: 10, padding: '12px 28px', fontSize: 14, fontWeight: 'bold', cursor: 'pointer', fontFamily: 'monospace', letterSpacing: '0.02em' },
+      loginNote:   { fontSize: 11, color: '#2a2a2e', fontFamily: 'monospace', marginTop: 14 },
+
+      header:      { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '22px 20px 14px', borderBottom: '1px solid #1e1e22' },
+      headerLeft:  { display: 'flex', alignItems: 'center', gap: 12 },
+      logo:        { fontSize: 34, color: '#c8a97e' },
+      title:       { fontSize: 19, fontWeight: 'bold', color: '#e8e4dc' },
+      sub:         { fontSize: 11, color: '#444', fontFamily: 'monospace', marginTop: 2 },
+      addBtn:      { background: '#c8a97e', color: '#0e0e10', border: 'none', borderRadius: 8, padding: '8px 16px', fontSize: 13, fontWeight: 'bold', cursor: 'pointer', fontFamily: 'monospace' },
+      signOutBtn:  { background: 'none', border: '1px solid #2a2a2e', borderRadius: 8, color: '#333', padding: '8px 10px', fontSize: 13, cursor: 'pointer', fontFamily: 'monospace' },
+      errorBanner: { background: '#2a1515', border: '1px solid #5a2020', color: '#e08080', fontSize: 12, padding: '10px 20px', fontFamily: 'monospace', lineHeight: 1.5 },
+
+      nav:         { display: 'flex', gap: 4, padding: '10px 20px', borderBottom: '1px solid #1e1e22', flexWrap: 'wrap' },
+      navBtn:      { background: 'none', border: '1px solid #2a2a2e', borderRadius: 20, color: '#666', padding: '5px 13px', fontSize: 12, cursor: 'pointer', fontFamily: 'monospace' },
+      navActive:   { background: '#1e1e22', color: '#c8a97e', borderColor: '#c8a97e44' },
+      body:        { padding: '18px 20px' },
+
+      hero:        { background: 'linear-gradient(135deg,#1a1610,#141214)', border: '1px solid #2a2218', borderRadius: 12, padding: '24px', marginBottom: 18 },
+      heroQuote:   { fontSize: 16, color: '#c8a97e', lineHeight: 1.65, fontStyle: 'italic' },
+      heroAttr:    { fontSize: 11, color: '#444', marginTop: 10, fontFamily: 'monospace' },
+
+      grid:        { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
+      card:        { background: '#131315', border: '1px solid #1e1e22', borderRadius: 12, padding: '16px 14px', cursor: 'pointer', textAlign: 'left', color: '#e8e4dc', transition: 'all 0.15s' },
+      cardIcon:    { fontSize: 22, marginBottom: 6 },
+      cardLabel:   { fontSize: 14, fontWeight: 'bold', marginBottom: 3 },
+      cardSub:     { fontSize: 11, color: '#444', fontFamily: 'monospace' },
+
+      entryCard:   { background: '#131315', border: '1px solid #1e1e22', borderRadius: 12, padding: '16px', marginBottom: 10, position: 'relative', cursor: 'pointer' },
+      entryText:   { fontSize: 14, lineHeight: 1.75, color: '#ddd9d0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+      entryDate:   { fontSize: 11, color: '#333', marginTop: 10, fontFamily: 'monospace' },
+      entryActions:{ position: 'absolute', top: 10, right: 10, display: 'flex', gap: 6 },
+      actionBtn:   { background: '#1e1e22', border: 'none', borderRadius: 6, color: '#777', padding: '3px 10px', fontSize: 11, cursor: 'pointer', fontFamily: 'monospace' },
+
+      randomTag:   { fontSize: 11, color: '#c8a97e', fontFamily: 'monospace', marginBottom: 10, letterSpacing: '0.05em' },
+      anotherBtn:  { background: 'none', border: '1px solid #2a2a2e', borderRadius: 8, color: '#666', padding: '10px', fontSize: 13, cursor: 'pointer', fontFamily: 'monospace', width: '100%', marginTop: 4 },
+
+      searchBox:   { width: '100%', background: '#131315', border: '1px solid #2a2a2e', borderRadius: 10, color: '#e8e4dc', padding: '11px 14px', fontSize: 14, fontFamily: 'Georgia,serif', marginBottom: 14, outline: 'none', boxSizing: 'border-box' },
+      empty:       { textAlign: 'center', color: '#333', fontSize: 13, padding: '40px 0', fontFamily: 'monospace' },
+
+      addTitle:    { fontSize: 18, fontWeight: 'bold', color: '#c8a97e', marginBottom: 6 },
+      addHint:     { fontSize: 12, color: '#444', marginBottom: 14, lineHeight: 1.5, fontFamily: 'monospace' },
+      ta:          { width: '100%', background: '#131315', border: '1px solid #2a2a2e', borderRadius: 10, color: '#e8e4dc', padding: '13px', fontSize: 13, fontFamily: 'Georgia,serif', resize: 'vertical', outline: 'none', lineHeight: 1.75, boxSizing: 'border-box' },
+      row:         { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 },
+      cancelBtn:   { background: 'none', border: '1px solid #2a2a2e', borderRadius: 8, color: '#555', padding: '7px 16px', fontSize: 13, cursor: 'pointer', fontFamily: 'monospace' },
+      saveBtn:     { background: '#c8a97e', border: 'none', borderRadius: 8, color: '#0e0e10', padding: '7px 16px', fontSize: 13, fontWeight: 'bold', cursor: 'pointer', fontFamily: 'monospace' },
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<VocabTracker />);
+  </script>
+</body>
+</html>
