@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>generative · test</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0e0e10;
+      color: #e8e4dc;
+      font-family: 'Georgia','Times New Roman',serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 36px;
+      overflow: hidden;
+    }
+    .orb {
+      width: 130px; height: 130px; border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #c8a97e, #3a2a14);
+      box-shadow: 0 0 40px #c8a97e22, 0 0 80px #c8a97e11;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; color: #0e0e10; font-family: monospace;
+      font-weight: bold; letter-spacing: 0.05em; user-select: none;
+    }
+    .orb.playing {
+      animation: breathe 5s ease-in-out infinite;
+      box-shadow: 0 0 80px #c8a97e55, 0 0 160px #c8a97e22;
+    }
+    @keyframes breathe { 0%,100%{transform:scale(1)}50%{transform:scale(1.08)} }
+    .label { font-size: 11px; color: #2a2a2e; font-family: monospace; letter-spacing: 0.1em; }
+    .voices {
+      display: flex; gap: 10px;
+    }
+    .voice-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #1e1e22;
+      transition: background 0.4s ease, box-shadow 0.4s ease;
+    }
+    .voice-dot.lit {
+      background: #c8a97e;
+      box-shadow: 0 0 8px #c8a97e88;
+    }
+  </style>
+</head>
+<body>
+  <div class="label" id="statusLabel">tap to begin</div>
+  <div class="orb" id="orb" onclick="toggle()">tap</div>
+  <div class="voices">
+    <div class="voice-dot" id="d0"></div>
+    <div class="voice-dot" id="d1"></div>
+    <div class="voice-dot" id="d2"></div>
+    <div class="voice-dot" id="d3"></div>
+    <div class="voice-dot" id="d4"></div>
+  </div>
+  <div class="label">generative · never repeats</div>
+
+  <script>
+    let started = false;
+    let playing = false;
+    let timers  = [];
+
+    // D minor — full scale for more melodic motion
+    const loScale  = ['D2','E2','F2','G2','A2','C3','D3'];
+    const midScale = ['D3','E3','F3','G3','A3','C4','D4','E4','F4'];
+    const hiScale  = ['A4','C5','D5','F5','G5','A5'];
+    const bassNotes= ['D1','A1','F1','C2','G1'];
+    const bellNotes= ['D5','F5','A5','C6','D6'];
+
+    function rnd(arr)         { return arr[Math.floor(Math.random()*arr.length)]; }
+    function rndFloat(lo, hi) { return Math.random()*(hi-lo)+lo; }
+
+    // Step-weighted melodic walk — notes tend to move by steps, not leaps
+    function stepNote(current, scale) {
+      const idx = scale.indexOf(current);
+      if (idx === -1) return rnd(scale);
+      const weights = scale.map((_,i) => Math.max(0.1, 4 - Math.abs(i - idx)));
+      const total = weights.reduce((a,b)=>a+b,0);
+      let r = Math.random()*total;
+      for (let i=0; i<weights.length; i++) { r -= weights[i]; if (r<=0) return scale[i]; }
+      return scale[scale.length-1];
+    }
+
+    function light(id, on) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (on) el.classList.add('lit'); else el.classList.remove('lit');
+      if (on) setTimeout(()=>el.classList.remove('lit'), 1800);
+    }
+
+    function addTimer(fn, ms) {
+      const t = setTimeout(fn, ms);
+      timers.push(t);
+      return t;
+    }
+
+    function clearAll() { timers.forEach(clearTimeout); timers=[]; }
+
+    // ── Phrase generator for melody — plays 1–4 notes in succession then rests ──
+    function schedulePhrase(synth, scale, dotId, minRest, maxRest) {
+      if (!playing) return;
+      const rest = rndFloat(minRest, maxRest) * 1000;
+      addTimer(() => {
+        if (!playing) return;
+        const phraseLen = Math.random() < 0.4 ? 1 : Math.random() < 0.6 ? 2 : 3;
+        let current = rnd(scale);
+        let offset  = 0;
+        for (let i=0; i<phraseLen; i++) {
+          const note = i===0 ? current : (current = stepNote(current, scale));
+          const dur  = rndFloat(2.5, 6);
+          const gap  = rndFloat(1.5, 4) * 1000; // within-phrase gap
+          ;(function(n, o, d){ addTimer(()=>{ if(!playing) return; synth.triggerAttackRelease(n,d); light(dotId, true); }, o); })(note, offset, dur);
+          offset += gap;
+        }
+        schedulePhrase(synth, scale, dotId, minRest, maxRest);
+      }, rest);
+    }
+
+    // ── Simple recurring voice ──
+    function scheduleVoice(fn, minGap, maxGap) {
+      if (!playing) return;
+      addTimer(()=>{ if(!playing) return; fn(); scheduleVoice(fn, minGap, maxGap); }, rndFloat(minGap,maxGap)*1000);
+    }
+
+    async function startMusic() {
+      await Tone.start();
+
+      // ── Effects chain ──
+      const limiter  = new Tone.Limiter(-2).toDestination(); // hard ceiling — no clipping ever
+      const reverb   = new Tone.Reverb({ decay: 9, wet: 0.65 }).connect(limiter);
+      const delay    = new Tone.FeedbackDelay({ delayTime: 0.42, feedback: 0.25, wet: 0.15 }).connect(reverb);
+      const loFilter = new Tone.Filter({ frequency: 880, type:'lowpass', rolloff:-24 }).connect(delay);
+      const hiFilter = new Tone.Filter({ frequency: 1600, type:'lowpass', rolloff:-12 }).connect(reverb);
+
+      // ── Voice 1: Low strings — bowed, warm ──
+      const v1 = new Tone.Synth({
+        oscillator:{ type:'sawtooth' },
+        envelope:{ attack:2.2, decay:0.3, sustain:0.9, release:5 },
+        volume: -5,
+      }).connect(loFilter);
+
+      // ── Voice 2: Mid strings — slightly higher, softer ──
+      const v2 = new Tone.Synth({
+        oscillator:{ type:'sawtooth' },
+        envelope:{ attack:1.8, decay:0.4, sustain:0.85, release:4 },
+        volume: -12,
+      }).connect(loFilter);
+
+      // ── Voice 3: Flute-like — sine, airy, high ──
+      const v3 = new Tone.Synth({
+        oscillator:{ type:'sine' },
+        envelope:{ attack:0.9, decay:0.5, sustain:0.7, release:3.5 },
+        volume: -15,
+      }).connect(hiFilter);
+
+      // ── Voice 4: Bell accent — FMSynth, rare ──
+      const v4 = new Tone.FMSynth({
+        harmonicity: 3.5,
+        modulationIndex: 8,
+        oscillator:{ type:'sine' },
+        envelope:{ attack:0.01, decay:1.5, sustain:0, release:2 },
+        modulation:{ type:'sine' },
+        modulationEnvelope:{ attack:0.01, decay:0.8, sustain:0, release:1 },
+        volume: -20,
+      }).connect(reverb);
+
+      // ── Voice 5: Deep bass — very sparse ──
+      const v5 = new Tone.Synth({
+        oscillator:{ type:'triangle' },
+        envelope:{ attack:1.2, decay:2, sustain:0.4, release:5 },
+        volume: -18,
+      }).connect(reverb);
+
+      // ── Pad — warm chords underneath everything ──
+      const pad = new Tone.PolySynth(Tone.Synth, {
+        oscillator:{ type:'sine' },
+        envelope:{ attack:3, decay:1, sustain:0.7, release:7 },
+        volume: -28,
+      }).connect(reverb);
+
+      // ── Start voices at staggered times so they don't all hit at once ──
+      schedulePhrase(v1, loScale,  'd0',  2, 7 );  // low strings
+      addTimer(()=> schedulePhrase(v2, midScale, 'd1', 3, 9),  5000);  // mid strings
+      addTimer(()=> schedulePhrase(v3, hiScale,  'd2', 5, 14), 11000); // flute
+
+      // Bell — very rare, just an accent
+      addTimer(()=> scheduleVoice(()=>{ if(Math.random()>0.5){ v4.triggerAttackRelease(rnd(bellNotes), 0.8); light('d3',true); } }, 12, 28), 15000);
+
+      // Bass
+      addTimer(()=> scheduleVoice(()=>{ if(Math.random()>0.4){ v5.triggerAttackRelease(rnd(bassNotes), rndFloat(2,5)); light('d4',true); } }, 8, 18), 8000);
+
+      // Pad chords — slow, background
+      function padLoop() {
+        if (!playing) return;
+        const chords = [['D3','A3','F3'],['F3','C4','A3'],['A2','E3','C3'],['C3','G3','E3']];
+        if (Math.random()>0.3) pad.triggerAttackRelease(rnd(chords), rndFloat(6,12));
+        addTimer(padLoop, rndFloat(8,16)*1000);
+      }
+      addTimer(padLoop, 3000);
+    }
+
+    async function toggle() {
+      const orb   = document.getElementById('orb');
+      const label = document.getElementById('statusLabel');
+
+      if (!started) {
+        started = true;
+        orb.textContent = '···';
+        playing = true;
+        await startMusic();
+        orb.textContent = '◼ stop';
+        orb.classList.add('playing');
+        label.textContent = 'playing';
+        return;
+      }
+
+      if (playing) {
+        playing = false;
+        clearAll();
+        orb.textContent = '▶ play';
+        orb.classList.remove('playing');
+        label.textContent = 'paused';
+      } else {
+        playing = true;
+        await startMusic();
+        orb.textContent = '◼ stop';
+        orb.classList.add('playing');
+        label.textContent = 'playing';
+      }
+    }
+  </script>
+</body>
+</html>
